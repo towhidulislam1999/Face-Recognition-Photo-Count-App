@@ -1,6 +1,6 @@
 streamlit
 opencv-python-headless==4.8.0.74
-numpy==1.26.4
+numpy
 pandas
 altair
 pillow
