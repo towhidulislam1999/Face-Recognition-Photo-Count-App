@@ -1,9 +1,10 @@
 streamlit
-opencv-python-headless==4.8.1.78
-numpy
+opencv-python-headless==4.8.0.74
+numpy<2.0.0
 pandas
 altair
 pillow
 scikit-learn
 deepface
-tenserflow=2.15.0
+tensorflow-cpu
+protobuf==3.20.3
