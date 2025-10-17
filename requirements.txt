@@ -6,3 +6,4 @@ altair
 pillow
 scikit-learn
 deepface
+tf-keras
