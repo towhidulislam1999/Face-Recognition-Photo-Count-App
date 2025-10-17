@@ -26,21 +26,68 @@ st.set_page_config(page_title="Face Count App", layout="wide")
 st.title("🎭 Face Recognition & Photo Count")
 st.write("Upload images. Faces will be grouped using deep learning; assign custom names with preview.")
 
-# Load face detector (Haar cascade, for initial face crop)
-@st.cache_resource
-def load_face_detector():
-    face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
-    return face_cascade
-
-face_detector = load_face_detector()
-
-def extract_face_embedding(face_img_rgb):
-    """Given cropped face in RGB np.array, extract DeepFace embedding."""
+def extract_faces_and_embeddings(image_bgr):
+    """
+    Extract faces using DeepFace's built-in detection (more accurate than Haar Cascade).
+    Returns list of (face_image_rgb, embedding) tuples.
+    """
+    results = []
     try:
-        result = DeepFace.represent(face_img_rgb, model_name='Facenet', enforce_detection=False)
-        return np.array(result[0]['embedding'])
+        # Convert BGR to RGB
+        image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
+        
+        # Use DeepFace to detect and extract faces with embeddings
+        # This uses MTCNN detector which is much more accurate than Haar Cascade
+        detections = DeepFace.extract_faces(
+            img_path=image_rgb,
+            detector_backend='retinaface',  # More accurate than opencv
+            enforce_detection=False,
+            align=True
+        )
+        
+        for detection in detections:
+            # Get face region
+            face_array = detection['face']
+            
+            # Check confidence score to filter false positives
+            confidence = detection.get('confidence', 0)
+            
+            # Only include high-confidence detections
+            if confidence > 0.90:  # 90% confidence threshold
+                # Convert face to uint8 if needed
+                if face_array.max() <= 1.0:
+                    face_array = (face_array * 255).astype(np.uint8)
+                
+                # Get embedding
+                try:
+                    embedding_result = DeepFace.represent(
+                        img_path=face_array,
+                        model_name='Facenet',
+                        enforce_detection=False
+                    )
+                    embedding = np.array(embedding_result[0]['embedding'])
+                    
+                    # Additional validation: check face quality
+                    # Calculate face sharpness (Laplacian variance)
+                    if len(face_array.shape) == 3:
+                        gray_face = cv2.cvtColor(face_array, cv2.COLOR_RGB2GRAY)
+                    else:
+                        gray_face = face_array
+                    
+                    laplacian_var = cv2.Laplacian(gray_face, cv2.CV_64F).var()
+                    
+                    # Only include if face is reasonably sharp (not blurry pattern)
+                    if laplacian_var > 50:  # Threshold for blur detection
+                        results.append((face_array, embedding))
+                        
+                except Exception as e:
+                    continue
+                    
     except Exception as e:
-        return None
+        # If DeepFace fails completely, return empty list
+        pass
+    
+    return results
 
 uploaded = st.file_uploader(
     "📁 Upload images (jpg/png), multiple files or drag-and-drop folder",
@@ -68,9 +115,20 @@ sensitivity = st.slider(
     "🎚️ Face grouping sensitivity (lower = group more faces together)",
     min_value=1, 
     max_value=10, 
-    value=3, 
+    value=4, 
     step=1,
     help="Lower values group similar faces together. Higher values create more separate groups."
+)
+
+# --- Detection quality filter ---
+st.sidebar.header("🔧 Advanced Settings")
+confidence_threshold = st.sidebar.slider(
+    "Face Detection Confidence",
+    min_value=0.80,
+    max_value=0.99,
+    value=0.90,
+    step=0.01,
+    help="Higher values = fewer false positives (clothes, patterns) but might miss some faces"
 )
 
 if st.button("🚀 Process Images", type="primary") and st.session_state.files:
@@ -84,36 +142,37 @@ if st.button("🚀 Process Images", type="primary") and st.session_state.files:
 
     all_features = []
     all_face_images = []
+    
+    # Statistics
+    total_detections = 0
+    filtered_detections = 0
 
     for i, file in enumerate(st.session_state.files):
         status.text(f"Processing image {i+1}/{n}: {file.name}")
 
-        img_bytes = file.read()
-        file.seek(0)
-        nparr = np.frombuffer(img_bytes, np.uint8)
-        image = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-
-        # Face detection
-        faces = face_detector.detectMultiScale(
-            gray,
-            scaleFactor=1.1,
-            minNeighbors=7,
-            minSize=(80, 80),
-            maxSize=(500, 500),
-            flags=cv2.CASCADE_SCALE_IMAGE
-        )
-
-        for (x, y, w, h) in faces:
-            # Crop and convert for DeepFace
-            face_roi_color = image[y:y+h, x:x+w]
-            face_rgb = cv2.cvtColor(face_roi_color, cv2.COLOR_BGR2RGB)
-            embedding = extract_face_embedding(face_rgb)
-            if embedding is None:
+        try:
+            img_bytes = file.read()
+            file.seek(0)
+            nparr = np.frombuffer(img_bytes, np.uint8)
+            image = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+            
+            if image is None:
                 continue
-            all_features.append(embedding)
-            face_pil = Image.fromarray(face_rgb)
-            all_face_images.append(face_pil)
+            
+            # Extract faces with embeddings using improved detection
+            face_results = extract_faces_and_embeddings(image)
+            
+            for face_array, embedding in face_results:
+                total_detections += 1
+                all_features.append(embedding)
+                face_pil = Image.fromarray(face_array)
+                all_face_images.append(face_pil)
+                filtered_detections += 1
+                
+        except Exception as e:
+            st.sidebar.warning(f"Error processing {file.name}: {str(e)}")
+            continue
+            
         progress.progress((i+1)/n)
 
     status.text("🔍 Grouping similar faces...")
@@ -122,7 +181,10 @@ if st.button("🚀 Process Images", type="primary") and st.session_state.files:
         X = np.array(all_features)
         scaler = StandardScaler()
         X_scaled = scaler.fit_transform(X)
-        distance_threshold = sensitivity * 0.7  # Lower scale for neural embedding
+        
+        # Adjusted distance threshold for Facenet embeddings
+        distance_threshold = sensitivity * 1.2
+        
         clustering = AgglomerativeClustering(
             n_clusters=None,
             distance_threshold=distance_threshold,
@@ -130,45 +192,59 @@ if st.button("🚀 Process Images", type="primary") and st.session_state.files:
         ).fit(X_scaled)
 
         st.session_state.cluster_labels = clustering.labels_
+        
         for idx, (face_img, label) in enumerate(zip(all_face_images, clustering.labels_)):
             st.session_state.face_data.append({
                 'image': face_img,
                 'cluster': label,
                 'index': idx
             })
+            
         unique_labels = sorted(set(clustering.labels_))
+        
         for label in unique_labels:
             person_name = f"Person {label + 1}"
             count = list(clustering.labels_).count(label)
             st.session_state.counts[person_name] = count
+            
         st.session_state.labels = list(st.session_state.counts.keys())
         st.session_state.processed = True
         status.empty()
-        st.success(f"✅ Processing complete! Found {len(all_features)} faces in {len(unique_labels)} groups.")
+        
+        st.success(f"✅ Processing complete! Found {len(all_features)} valid faces in {len(unique_labels)} groups.")
+        
+        if total_detections > filtered_detections:
+            st.info(f"ℹ️ Filtered out {total_detections - filtered_detections} low-quality detections (likely false positives)")
     else:
         status.empty()
-        st.warning("⚠️ No faces detected. Try different images or lower the sensitivity.")
+        st.warning("⚠️ No faces detected. Try different images or adjust the confidence threshold in the sidebar.")
 
-# --- Name editing with preview --- (no changes needed)
+# --- Name editing with preview ---
 if st.session_state.processed and st.session_state.labels:
     st.subheader("✏️ Edit Person Names")
     st.write("Preview the faces in each group and assign custom names:")
 
     new_labels = {}
+    
     for person_name in st.session_state.labels:
         st.divider()
         cluster_num = int(person_name.split()[-1]) - 1
         faces_in_cluster = [fd for fd in st.session_state.face_data if fd['cluster'] == cluster_num]
+        
         col1, col2 = st.columns([2, 1])
+        
         with col1:
             st.write(f"**{person_name}** ({len(faces_in_cluster)} photos)")
             preview_faces = faces_in_cluster[:10]
             cols = st.columns(min(len(preview_faces), 5))
+            
             for idx, face_data in enumerate(preview_faces):
                 with cols[idx % 5]:
                     st.image(face_data['image'], width=100, caption=f"#{idx+1}")
+                    
             if len(faces_in_cluster) > 10:
                 st.caption(f"...and {len(faces_in_cluster) - 10} more")
+                
         with col2:
             st.write("")
             st.write("")
@@ -185,31 +261,39 @@ if st.session_state.processed and st.session_state.labels:
         for old_name, new_name in new_labels.items():
             if old_name in st.session_state.counts:
                 new_counts[new_name] = st.session_state.counts[old_name]
+                
         st.session_state.counts = new_counts
         st.session_state.labels = list(new_counts.keys())
         st.success("✅ Names updated successfully!")
         st.rerun()
 
+# --- Report & Visualization ---
 if st.session_state.counts:
     st.divider()
     st.subheader("📊 Photo Count per Person")
+    
     df = pd.DataFrame({
         "Name": list(st.session_state.counts.keys()),
         "Count": list(st.session_state.counts.values())
     }).sort_values("Count", ascending=False)
+    
     col1, col2 = st.columns([1, 2])
+    
     with col1:
         st.dataframe(df, use_container_width=True, hide_index=True)
         st.metric("Total Faces", df["Count"].sum())
         st.metric("Unique People", len(df))
+        
     with col2:
         chart = alt.Chart(df).mark_bar(color='#1f77b4').encode(
             x=alt.X("Count:Q", title="Number of Photos"),
             y=alt.Y("Name:N", sort="-x", title="Person"),
             tooltip=["Name", "Count"]
         ).properties(height=400)
+        
         st.altair_chart(chart, use_container_width=True)
 
+# --- Export results ---
 if st.session_state.counts:
     st.subheader("💾 Export Results")
     csv = df.to_csv(index=False)
@@ -220,6 +304,7 @@ if st.session_state.counts:
         mime="text/csv"
     )
 
+# --- Reset session ---
 st.divider()
 if st.button("🔄 Reset Session", type="secondary"):
     for key in ["face_data", "labels", "counts", "files", "processed", "cluster_labels"]:

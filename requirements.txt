@@ -7,3 +7,4 @@ pillow
 scikit-learn
 deepface
 tf-keras
+retina-face
