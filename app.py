@@ -224,27 +224,27 @@ if st.session_state.processed and st.session_state.labels:
     st.subheader("✏️ Edit Person Names")
     st.write("Preview the faces in each group and assign custom names:")
 
+    # Create a mapping of old names to cluster numbers
+    name_to_cluster = {}
+    for person_name in st.session_state.labels:
+        cluster_num = int(person_name.split()[-1]) - 1
+        name_to_cluster[person_name] = cluster_num
+
     new_labels = {}
-    
     for person_name in st.session_state.labels:
         st.divider()
-        cluster_num = int(person_name.split()[-1]) - 1
+        cluster_num = name_to_cluster[person_name]
         faces_in_cluster = [fd for fd in st.session_state.face_data if fd['cluster'] == cluster_num]
-        
         col1, col2 = st.columns([2, 1])
-        
         with col1:
             st.write(f"**{person_name}** ({len(faces_in_cluster)} photos)")
             preview_faces = faces_in_cluster[:10]
             cols = st.columns(min(len(preview_faces), 5))
-            
             for idx, face_data in enumerate(preview_faces):
                 with cols[idx % 5]:
                     st.image(face_data['image'], width=100, caption=f"#{idx+1}")
-                    
             if len(faces_in_cluster) > 10:
                 st.caption(f"...and {len(faces_in_cluster) - 10} more")
-                
         with col2:
             st.write("")
             st.write("")
@@ -257,56 +257,13 @@ if st.session_state.processed and st.session_state.labels:
             new_labels[person_name] = new_name
 
     if st.button("💾 Apply Name Changes", type="primary"):
-        # Create mapping from old person names to new names
-        name_mapping = {}
-        for old_name, new_name in new_labels.items():
-            cluster_num = int(old_name.split()[-1]) - 1
-            name_mapping[cluster_num] = new_name
-        
-        # Update cluster assignments in face_data based on new names
-        # Group clusters with same name together
-        name_to_clusters = {}
-        for cluster_num, name in name_mapping.items():
-            if name not in name_to_clusters:
-                name_to_clusters[name] = []
-            name_to_clusters[name].append(cluster_num)
-        
-        # Reassign cluster labels for merged groups
-        new_cluster_assignment = {}
-        for name, cluster_list in name_to_clusters.items():
-            # All clusters with same name get the same new cluster number
-            primary_cluster = min(cluster_list)
-            for cluster in cluster_list:
-                new_cluster_assignment[cluster] = primary_cluster
-        
-        # Update face_data with merged clusters
-        for face_data in st.session_state.face_data:
-            old_cluster = face_data['cluster']
-            face_data['cluster'] = new_cluster_assignment.get(old_cluster, old_cluster)
-        
-        # Recalculate counts based on merged groups
         new_counts = {}
-        for name, cluster_list in name_to_clusters.items():
-            # Count all faces in all clusters with this name
-            total_count = sum([
-                len([fd for fd in st.session_state.face_data if fd['cluster'] == new_cluster_assignment.get(c, c)])
-                for c in cluster_list
-            ])
-            # Use set to avoid counting same cluster multiple times
-            merged_cluster = new_cluster_assignment.get(cluster_list[0], cluster_list[0])
-            face_count = len([fd for fd in st.session_state.face_data if fd['cluster'] == merged_cluster])
-            new_counts[name] = face_count
-        
+        for old_name, new_name in new_labels.items():
+            if old_name in st.session_state.counts:
+                new_counts[new_name] = st.session_state.counts[old_name]
         st.session_state.counts = new_counts
         st.session_state.labels = list(new_counts.keys())
-        
-        # Show merge information
-        merged_groups = [name for name, clusters in name_to_clusters.items() if len(clusters) > 1]
-        if merged_groups:
-            st.success(f"✅ Names updated! Merged groups: {', '.join(merged_groups)}")
-        else:
-            st.success("✅ Names updated successfully!")
-        
+        st.success("✅ Names updated successfully!")
         st.rerun()
 
 # --- Report & Visualization ---
